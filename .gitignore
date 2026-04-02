@@ -1,0 +1,23 @@
+# Local agent instructions and planning docs
+CLAUDE.md
+plan/
+.claude/settings.local.json
+
+# Datasets and training runs
+data/
+runs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+.pytest_cache/
+
+# Web
+node_modules/
+web/dist/
+
+# OS and secrets
+.DS_Store
+.env
