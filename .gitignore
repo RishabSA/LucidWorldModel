@@ -3,9 +3,10 @@ CLAUDE.md
 plan/
 .claude/settings.local.json
 
-# Datasets and training runs
+# Datasets, training runs and exported models (kept local)
 data/
 runs/
+web/public/models/
 
 # Python
 __pycache__/
