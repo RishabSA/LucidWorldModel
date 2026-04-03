@@ -40,7 +40,9 @@ def test_shapes() -> None:
     frames, actions, noise = make_batch()
 
     with torch.inference_mode():
-        denoised = denoiser(noise[:, :3], torch.ones(batch), frames, actions, torch.zeros(batch))
+        denoised = denoiser(
+            noise[:, :3], torch.ones(batch), frames, actions, torch.zeros(batch)
+        )
         frame = sample(denoiser, frames, actions, noise)
         snapped = snap(frame, palette_tensor())
 
@@ -58,7 +60,9 @@ def test_denoiser_returns_input_as_sigma_goes_to_zero() -> None:
     x = noise[:, :3]
 
     with torch.inference_mode():
-        denoised = denoiser(x, torch.full((batch,), 1e-6), frames, actions, torch.zeros(batch))
+        denoised = denoiser(
+            x, torch.full((batch,), 1e-6), frames, actions, torch.zeros(batch)
+        )
 
     torch.testing.assert_close(denoised, x, atol=1e-4, rtol=0)
 
@@ -70,7 +74,13 @@ def test_one_step_is_one_denoiser_call() -> None:
 
     with torch.inference_mode():
         frame = sample(denoiser, frames, actions, noise, steps=1, sigma_max=sigma_max)
-        denoised = denoiser(sigma_max * noise[:, :3], torch.full((batch,), sigma_max), frames, actions, torch.zeros(batch))
+        denoised = denoiser(
+            sigma_max * noise[:, :3],
+            torch.full((batch,), sigma_max),
+            frames,
+            actions,
+            torch.zeros(batch),
+        )
 
     assert torch.equal(frame, denoised)
 
