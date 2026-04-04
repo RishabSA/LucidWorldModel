@@ -13,6 +13,9 @@ n_groups = 8
 channel_mults = (1, 2, 4, 4)
 blocks_per_level = 2
 middle_blocks = 2
+p_mean = -0.4
+p_std = 1.2
+sigma_aug_max = 0.7
 
 
 def group_norm(x: torch.Tensor, groups: int, eps: float = 1e-5) -> torch.Tensor:
@@ -253,3 +256,36 @@ def snap(x: torch.Tensor, palette: torch.Tensor) -> torch.Tensor:
     return F.embedding(index, palette).permute(
         0, 3, 1, 2
     )  # shape: (batch, 3, height, width)
+
+
+def edm_loss(
+    denoiser: Denoiser,
+    target: torch.Tensor,
+    context: torch.Tensor,
+    actions: torch.Tensor,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    batch, device = target.shape[0], target.device
+    sigma = torch.exp(
+        p_mean + p_std * torch.randn(batch, device=device, generator=generator)
+    )  # shape: (batch,)
+    sigma_aug = sigma_aug_max * torch.rand(batch, device=device, generator=generator)
+
+    # Context noise augmentation: the model learns to repair imperfect context frames
+    context = context + sigma_aug[:, None, None, None] * torch.randn(
+        context.shape, device=device, generator=generator
+    )
+    s = sigma[:, None, None, None]
+    x = target + s * torch.randn(target.shape, device=device, generator=generator)
+
+    # Same preconditioning as Denoiser.forward; regressing the raw network onto its unit-variance target equals the lambda-weighted loss on D
+    total = s * s + denoiser.sigma_data**2
+    c_skip = denoiser.sigma_data**2 / total
+    c_out = s * denoiser.sigma_data / torch.sqrt(total)
+    c_in = 1 / torch.sqrt(total)
+    output = denoiser.net(c_in * x, torch.log(sigma) / 4, context, actions, sigma_aug)
+    losses = ((output.float() - (target - c_skip * x) / c_out) ** 2).mean(
+        dim=(1, 2, 3)
+    )  # shape: (batch,)
+
+    return losses, sigma
