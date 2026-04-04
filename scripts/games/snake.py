@@ -1,5 +1,7 @@
 import random
 from collections import deque
+from itertools import pairwise, takewhile
+from operator import itemgetter
 
 import numpy as np
 import pygame
@@ -49,6 +51,7 @@ score_digits = 3
 start_length = 3
 start_cell = (8, 7)
 flash_ticks = 3
+start_snake = [(start_cell[0] - i, start_cell[1]) for i in range(start_length)]
 
 moves = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
 move_names = {move: name for name, move in moves.items()}
@@ -59,14 +62,53 @@ def in_bounds(col: int, row: int) -> bool:
     return 0 <= col < cols and 0 <= row < rows
 
 
+# Reversals and actions outside the arrows keep the current direction
+def turn(direction: str, action: int) -> str:
+    if action in actions[1:] and action_names[action] != opposite[direction]:
+        return action_names[action]
+
+    return direction
+
+
+def draw(state: dict) -> np.ndarray:
+    surface = pygame.Surface((frame_size, frame_size))
+    surface.fill(background_color)
+    surface.fill(wall_color, (0, 0, frame_size, board_top))
+    draw_number(surface, state["score"], score_x, score_y, text_color)
+
+    if state["food"] is not None:
+        col, row = state["food"]
+        surface.fill(food_color, (col * cell, board_top + row * cell, segment, segment))
+
+    # One rect per consecutive pair covers both segments and the bridge between them
+    link_color = dead_color if state["dead"] else body_color
+    snake = state["snake"]
+
+    for (col, row), (next_col, next_row) in pairwise(snake):
+        surface.fill(
+            link_color,
+            (
+                min(col, next_col) * cell,
+                board_top + min(row, next_row) * cell,
+                segment + abs(col - next_col) * cell,
+                segment + abs(row - next_row) * cell,
+            ),
+        )
+
+    # The head keeps its color while dead, so a single frame still says which end is the head
+    col, row = snake[0]
+    surface.fill(head_color, (col * cell, board_top + row * cell, segment, segment))
+
+    return to_array(surface)
+
+
 class Game:
     def __init__(self, seed: int) -> None:
         self.rng = random.Random(seed)
-        self.surface = pygame.Surface((frame_size, frame_size))
         self.restart()
 
     def restart(self) -> None:
-        self.snake = [(start_cell[0] - i, start_cell[1]) for i in range(start_length)]
+        self.snake = list(start_snake)
         self.direction = "right"
         self.score = 0
         self.flash = 0
@@ -95,10 +137,7 @@ class Game:
             self.restart()
             return event_restart | event_random
 
-        direction = self.direction
-        if action in actions[1:] and action_names[action] != opposite[direction]:
-            direction = action_names[action]
-
+        direction = turn(self.direction, action)
         head_col, head_row = self.snake[0]
         dx, dy = moves[direction]
         head = (head_col + dx, head_row + dy)
@@ -127,37 +166,7 @@ class Game:
         return event_score | event_random
 
     def render(self) -> np.ndarray:
-        self.surface.fill(background_color)
-        self.surface.fill(wall_color, (0, 0, frame_size, board_top))
-        draw_number(self.surface, self.score, score_x, score_y, text_color)
-
-        if self.food is not None:
-            col, row = self.food
-            self.surface.fill(
-                food_color, (col * cell, board_top + row * cell, segment, segment)
-            )
-
-        # One rect per consecutive pair covers both segments and the bridge between them
-        link_color = dead_color if self.flash else body_color
-
-        for (col, row), (next_col, next_row) in zip(self.snake, self.snake[1:]):
-            self.surface.fill(
-                link_color,
-                (
-                    min(col, next_col) * cell,
-                    board_top + min(row, next_row) * cell,
-                    segment + abs(col - next_col) * cell,
-                    segment + abs(row - next_row) * cell,
-                ),
-            )
-
-        # The head keeps its color while dead, so a single frame still says which end is the head
-        col, row = self.snake[0]
-        self.surface.fill(
-            head_color, (col * cell, board_top + row * cell, segment, segment)
-        )
-
-        return to_array(self.surface)
+        return draw(self.state())
 
     def state(self) -> dict:
         return {
@@ -213,6 +222,51 @@ def extract(frame: np.ndarray) -> dict:
         "length": len(snake),
         "dead": dead,
     }
+
+
+# History is the extracted states before this frame, oldest first; at least flash_ticks of them so the dead run is never cut off
+def check(
+    history: list, action: int, frame: np.ndarray
+) -> tuple[list[str], dict | None]:
+    try:
+        state = extract(frame)
+    except (IndexError, ValueError):
+        return ["unreadable"], None
+
+    prev = history[-1]
+    foods = np.all(frame[board_top::cell, ::cell] == food_color, axis=-1).sum()
+    full = state["length"] == cols * rows
+    broken = {
+        "render": not np.array_equal(draw(state), frame),
+        "food": foods != (0 if full else 1) or state["food"] in state["snake"],
+    }
+
+    if prev["dead"]:
+        dead_frames = len(list(takewhile(itemgetter("dead"), reversed(history))))
+        if dead_frames < flash_ticks:
+            broken["flash"] = state != prev
+        else:
+            broken["restart"] = (
+                state["dead"] or state["snake"] != start_snake or state["score"] != 0
+            )
+    else:
+        col, row = prev["snake"][0]
+        dx, dy = moves[turn(prev["direction"], action)]
+        head = (col + dx, row + dy)
+        eating = head == prev["food"]
+        body = prev["snake"] if eating else prev["snake"][:-1]
+
+        # A death freezes the whole frame and only switches the body to the dead color
+        if not in_bounds(*head) or head in body:
+            broken["death"] = state != {**prev, "dead": True}
+        else:
+            broken["death"] = state["dead"] != (len(body) + 1 == cols * rows)
+            broken["head"] = state["snake"][0] != head
+            broken["body"] = state["snake"][1:] != body
+            broken["score"] = state["score"] != prev["score"] + eating
+            broken["food"] |= not eating and state["food"] != prev["food"]
+
+    return [name for name, failed in broken.items() if failed], state
 
 
 def distances(start: tuple, blocked: set) -> dict:
