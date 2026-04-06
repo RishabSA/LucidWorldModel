@@ -1,4 +1,5 @@
 import argparse
+import copy
 import json
 import os
 from collections import Counter
@@ -8,6 +9,7 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.utils.flop_counter import FlopCounterMode
 
@@ -29,6 +31,26 @@ opset = 18
 reinit_std = 0.02
 min_parity = 0.999
 input_names = ["context", "actions", "noise"]
+stem_multiple = 4
+
+
+# onnxruntime-web 1.31.1's WebGPU Conv is wrong for 15 or 27 input channels, so zero channels pad the stem
+class PaddedConv(nn.Module):
+    def __init__(self, conv: nn.Conv2d, multiple: int) -> None:
+        super().__init__()
+
+        self.extra = -conv.in_channels % multiple
+        self.conv = nn.Conv2d(
+            conv.in_channels + self.extra,
+            conv.out_channels,
+            conv.kernel_size,
+            padding=conv.padding,
+        )
+        self.conv.weight.data = F.pad(conv.weight.data, (0, 0, 0, 0, 0, self.extra))
+        self.conv.bias.data = conv.bias.data.clone()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(F.pad(x, (0, 0, 0, 0, 0, self.extra)))
 
 
 class FrameGraph(nn.Module):
@@ -42,7 +64,8 @@ class FrameGraph(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.denoiser = denoiser
+        self.denoiser = copy.deepcopy(denoiser)
+        self.denoiser.net.stem = PaddedConv(denoiser.net.stem, stem_multiple)
         self.steps = steps
         self.sampler = sampler
         self.register_buffer("palette", palette)

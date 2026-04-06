@@ -8,9 +8,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch import nn
 
 from scripts.evaluate import to_frames, to_model
-from scripts.export_onnx import min_parity, randomize_zero_init, run_onnx
+from scripts.export_onnx import PaddedConv, min_parity, randomize_zero_init, run_onnx
 from scripts.games import snake
 from scripts.games.common import event_restart, frame_size, save_chunk
 from scripts.model import Denoiser
@@ -167,3 +168,13 @@ def test_export_writes_browser_files(tmp_path: Path) -> None:
 
     result = run_export(run, out, len(windows))
     assert result.returncode != 0 and "FileExistsError" in result.stderr
+
+
+def test_padded_stem_is_exact() -> None:
+    torch.manual_seed(0)
+    conv = nn.Conv2d(3 * (n + 1), width, 3, padding=1)
+    padded = PaddedConv(conv, 4)
+    x = torch.randn(2, 3 * (n + 1), frame_size, frame_size)
+
+    assert padded.conv.in_channels == 16
+    torch.testing.assert_close(padded(x), conv(x))
