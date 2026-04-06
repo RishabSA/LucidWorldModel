@@ -32,20 +32,26 @@ input_names = ["context", "actions", "noise"]
 
 
 class FrameGraph(nn.Module):
+    # Sampler settings (sigma_aug, sigma_max, sigma_min, rho) go to sample() and are baked into the graph
     def __init__(
-        self, denoiser: Denoiser, steps: int, palette: torch.Tensor | None
+        self,
+        denoiser: Denoiser,
+        steps: int,
+        palette: torch.Tensor | None,
+        **sampler: float,
     ) -> None:
         super().__init__()
 
         self.denoiser = denoiser
         self.steps = steps
+        self.sampler = sampler
         self.register_buffer("palette", palette)
 
     def forward(
         self, context: torch.Tensor, actions: torch.Tensor, noise: torch.Tensor
     ) -> torch.Tensor:
         frame = sample(
-            self.denoiser, context, actions, noise, self.steps, sigma_aug_star
+            self.denoiser, context, actions, noise, self.steps, **self.sampler
         )  # shape: (1, 3, 64, 64)
 
         return frame if self.palette is None else snap(frame, self.palette)
@@ -97,6 +103,11 @@ def export(
 
     for node in model.graph.node:
         del node.metadata_props[:]
+
+    if any(node.op_type == "GroupNormalization" for node in model.graph.node):
+        raise RuntimeError(
+            f"{path} contains GroupNormalization, which has no WebGPU kernel in onnxruntime-web"
+        )
 
     onnx.save(model, path)
     return model
@@ -171,7 +182,9 @@ if __name__ == "__main__":
         for steps in args.steps:
             name = f"w{width}_k{steps}"
             path = args.out_dir / f"{name}.onnx"
-            graph = FrameGraph(denoiser, steps, palette_tensor()).eval()
+            graph = FrameGraph(
+                denoiser, steps, palette_tensor(), sigma_aug=sigma_aug_star
+            ).eval()
             inputs = random_inputs(args.context, generator)
             model = export(graph, inputs, path)
 
@@ -182,11 +195,6 @@ if __name__ == "__main__":
             print(
                 f"  ops: {', '.join(f'{op} {count}' for op, count in ops.most_common())}"
             )
-
-            if "GroupNormalization" in ops:
-                raise RuntimeError(
-                    f"{path} contains GroupNormalization, which has no WebGPU kernel in onnxruntime-web"
-                )
 
             # Fresh inputs, so parity is not measured on the tracing inputs
             inputs = random_inputs(args.context, generator)

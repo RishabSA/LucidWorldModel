@@ -26,6 +26,7 @@ gif_scale = 8
 hold_ms = 1000
 marker_color = (255, 0, 0)
 sampler_keys = ["sigma_aug", "sigma_max", "sigma_min", "rho"]
+override_keys = ["sigma_max", "sigma_min", "rho"]
 
 
 def pick_device(name: str | None) -> torch.device:
@@ -392,6 +393,24 @@ if __name__ == "__main__":
         default=None,
         help="Torch device; cuda, then mps, then cpu when unset (default: None).",
     )
+    parser.add_argument(
+        "--sigma-max",
+        type=float,
+        default=None,
+        help="Sampler sigma_max; the run's config value when unset (default: None).",
+    )
+    parser.add_argument(
+        "--sigma-min",
+        type=float,
+        default=None,
+        help="Sampler sigma_min; the run's config value when unset (default: None).",
+    )
+    parser.add_argument(
+        "--rho",
+        type=float,
+        default=None,
+        help="Sampler rho; the run's config value when unset (default: None).",
+    )
     args = parser.parse_args()
 
     started = time.time()
@@ -424,8 +443,17 @@ if __name__ == "__main__":
     palette = (
         torch.tensor(game.palette, dtype=torch.float32, device=device) / 127.5 - 1
     )  # shape: (colors, 3)
-    sampler = {key: config[key] for key in sampler_keys}
+    overrides = {
+        key: vars(args)[key] for key in override_keys if vars(args)[key] is not None
+    }
+    sampler = {key: config[key] for key in sampler_keys} | overrides
     out_dir = args.run / f"eval_{checkpoint['step']}"
+
+    # A tuned schedule gets its own folder, so the default-schedule results are never overwritten
+    if overrides:
+        out_dir = out_dir.with_name(
+            f"{out_dir.name}_max{sampler['sigma_max']}_min{sampler['sigma_min']}_rho{sampler['rho']}"
+        )
     os.makedirs(out_dir, exist_ok=True)
     metrics = {
         "checkpoint": str(args.run / args.ckpt),
