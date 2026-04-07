@@ -18,3 +18,27 @@ export async function fetchOk(url: string): Promise<Response> {
 		);
 	return response;
 }
+
+// Reports the fraction received, from content-length (no reports when the server omits it)
+export async function fetchBytes(
+	url: string,
+	onProgress: (fraction: number) => void,
+): Promise<Uint8Array> {
+	const response = await fetchOk(url);
+	const total = Number(response.headers.get("content-length"));
+	let loaded = 0;
+	const counted = response.body!.pipeThrough(
+		new TransformStream<Uint8Array, Uint8Array>({
+			transform(chunk, controller) {
+				loaded += chunk.length;
+				if (total) onProgress(Math.min(1, loaded / total));
+				controller.enqueue(chunk);
+			},
+		}),
+	);
+	return new Uint8Array(await new Response(counted).arrayBuffer());
+}
+
+export function message(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
