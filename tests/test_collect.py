@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 
 from scripts.check_observability import find_collisions
-from scripts.collect import collect
+from scripts.collect import collect, summarize
 from scripts.games import snake
 from scripts.games.common import frame_size, load_chunk
 
@@ -40,3 +40,4 @@ def test_collect_replays_exactly_and_passes_observability() -> None:
         assert np.array_equal(events, chunk["events"])
 
     assert report["unflagged"] == []
+    assert summarize(results, snake)["coverage"].keys() == snake.targets.keys()

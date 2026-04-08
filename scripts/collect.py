@@ -9,6 +9,7 @@ import time
 from collections import Counter
 from multiprocessing import Pool
 from pathlib import Path
+from types import ModuleType
 
 import numpy as np
 from PIL import Image
@@ -41,12 +42,6 @@ event_names = {
     "restart": event_restart,
     "random": event_random,
 }
-snake_targets = {
-    "max length": 40,
-    "food events": 20_000,
-    "wall deaths": 5_000,
-    "self deaths": 1_000,
-}
 
 
 # Half the episodes turn reckless past a random score, so deaths also happen in long, late-game states
@@ -72,8 +67,7 @@ def collect_chunk(job: dict) -> dict:
     state = game.state()
     action = rng.choice(module.actions)
     epsilon, ramp_at = episode_noise(rng)
-    causes = Counter()
-    lengths = Counter()
+    tallies = Counter()
 
     for t in range(steps):
         if job["source"] == "random":
@@ -89,10 +83,7 @@ def collect_chunk(job: dict) -> dict:
         frames[t + 1] = game.render()
         actions[t] = action
         events[t] = flags
-        lengths[state["length"]] += 1
-
-        if flags & event_death:
-            causes[state["cause"]] += 1
+        tallies.update(module.tally(state, flags))
 
         # Each episode gets its own noise level
         if flags & event_restart:
@@ -107,8 +98,7 @@ def collect_chunk(job: dict) -> dict:
         **job,
         "events": counts,
         "episodes": counts["restart"] + 1,
-        "causes": causes,
-        "lengths": lengths,
+        "counts": tallies,
     }
 
 
@@ -146,9 +136,8 @@ def collect(
     return results
 
 
-def summarize(results: list[dict]) -> dict:
-    causes = sum((result["causes"] for result in results), Counter())
-    lengths = sum((result["lengths"] for result in results), Counter())
+def summarize(results: list[dict], module: ModuleType) -> dict:
+    counts = sum((result["counts"] for result in results), Counter())
 
     return {
         "steps": sum(result["steps"] for result in results),
@@ -157,9 +146,7 @@ def summarize(results: list[dict]) -> dict:
             name: sum(result["events"][name] for result in results)
             for name in event_names
         },
-        "deaths_by_cause": dict(causes),
-        "max_length": max(lengths, default=0),
-        "length_histogram": dict(sorted(lengths.items())),
+        "coverage": module.coverage(counts),
     }
 
 
@@ -249,10 +236,12 @@ if __name__ == "__main__":
     )
 
     coverage = {
-        source: summarize([result for result in results if result["source"] == source])
+        source: summarize(
+            [result for result in results if result["source"] == source], module
+        )
         for source in sources
     }
-    coverage["all"] = summarize(results)
+    coverage["all"] = summarize(results, module)
     human_steps = sum(
         len(load_chunk(path)["actions"]) for path in (args.out / "human").glob("*.npz")
     )
@@ -298,19 +287,14 @@ if __name__ == "__main__":
         )
 
     total = coverage["all"]
-    values = {
-        "max length": total["max_length"],
-        "food events": total["events"]["score"],
-        "wall deaths": total["deaths_by_cause"].get("wall", 0),
-        "self deaths": total["deaths_by_cause"].get("self", 0),
-    }
     print(
-        f"Steps: {meta['steps']}, episodes: {total['episodes']}, events: {total['events']}, deaths by cause: {total['deaths_by_cause']}"
+        f"Steps: {meta['steps']}, episodes: {total['episodes']}, events: {total['events']}"
     )
 
-    for name, target in snake_targets.items():
-        status = "met" if values[name] >= target else "short"
-        print(f"  {name}: {values[name]} (target {target}, {status})")
+    for name, target in module.targets.items():
+        value = total["coverage"][name]
+        status = "met" if value >= target else "short"
+        print(f"  {name}: {value} (target {target}, {status})")
 
     print(
         f"Wrote {len(results)} chunks, meta.json and {args.preview} previews to {args.out}"

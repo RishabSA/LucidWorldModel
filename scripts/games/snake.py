@@ -1,5 +1,5 @@
 import random
-from collections import deque
+from collections import Counter, deque
 from itertools import pairwise, takewhile
 from operator import itemgetter
 
@@ -22,6 +22,13 @@ tick_hz = 10
 context = 4
 actions = [0, 1, 2, 3, 4]
 input_mode = "queue"
+# Coverage goals for collected data, checked by scripts/collect.py
+targets = {
+    "max length": 40,
+    "food events": 20_000,
+    "wall deaths": 5_000,
+    "self deaths": 1_000,
+}
 
 background_color = (16, 16, 24)
 wall_color = (64, 72, 128)
@@ -318,3 +325,24 @@ def policy(state: dict, rng: random.Random) -> int:
     move = rng.choice([name for name in safe if scores.get(name) == best])
 
     return 0 if move == state["direction"] else action_names.index(move)
+
+
+# Coverage keys for one transition; scripts/collect.py sums them over the data
+def tally(state: dict, flags: int) -> list:
+    keys = [("length", state["length"])]
+
+    if flags & event_score:
+        keys.append(("food",))
+    if flags & event_death:
+        keys.append(("death", state["cause"]))
+
+    return keys
+
+
+def coverage(counts: Counter) -> dict:
+    return {
+        "max length": max((key[1] for key in counts if key[0] == "length"), default=0),
+        "food events": counts[("food",)],
+        "wall deaths": counts[("death", "wall")],
+        "self deaths": counts[("death", "self")],
+    }
