@@ -68,9 +68,10 @@ function Parity() {
 				const model = new Uint8Array(
 					await (await fetchOk(`${modelDir}/${meta.model}`)).arrayBuffer(),
 				);
-				const engine = await Engine.create(model, meta.context);
+				const engine = new Engine(meta.context);
 
 				try {
+					await engine.setModel(model);
 					for (const [index, item] of parity.cases.entries()) {
 						engine.load(decode(item.frames), item.actions);
 						engine.noise.set(new Float32Array(decode(item.noise).buffer));

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
 	Engine,
@@ -6,6 +6,7 @@ import {
 	modelDir,
 	toRgba,
 	type GameEntry,
+	type Graph,
 	type Meta,
 } from "./engine.ts";
 import { listen } from "./input.ts";
@@ -25,13 +26,19 @@ interface Stats {
 }
 
 // Ticks behind the median run time and the effective tick rate
-const statWindow = 50;
+const statWindow = 30;
 const pausePollMs = 50;
 // Below this fraction of tick_hz, the tick rate shows as a warning
 const slowFraction = 0.95;
+const bytesPerMb = 1e6;
 const button =
 	"cursor-pointer rounded-md border border-neutral-300 px-4 py-1.5 text-sm transition-colors hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-neutral-700 dark:hover:bg-neutral-800";
+const toggle =
+	"aria-pressed:border-blue-600 aria-pressed:bg-blue-600 aria-pressed:text-white dark:aria-pressed:border-blue-500 dark:aria-pressed:bg-blue-500 dark:aria-pressed:text-white";
 const label = "text-neutral-500 dark:text-neutral-400";
+
+// Downloads stay in memory, so switching back to a game or a step count is instant
+const downloads = new Map<string, Uint8Array>();
 
 function sleep(ms: number): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, ms));
@@ -49,6 +56,7 @@ function App() {
 	const [games, setGames] = useState<GameEntry[]>([]);
 	const [entry, setEntry] = useState<GameEntry | null>(null);
 	const [meta, setMeta] = useState<Meta | null>(null);
+	const [graph, setGraph] = useState<Graph | null>(null);
 	const [stats, setStats] = useState<Stats | null>(null);
 	const [loading, setLoading] = useState("Checking WebGPU");
 	const [progress, setProgress] = useState(0);
@@ -58,6 +66,7 @@ function App() {
 	// The tick loop reads these between ticks, so a click never interrupts a session.run
 	const pausedRef = useRef<boolean>(false);
 	const restartRef = useRef<boolean>(false);
+	const stepsRef = useRef<number>(0);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -84,6 +93,7 @@ function App() {
 
 		const play = async () => {
 			setMeta(null);
+			setGraph(null);
 			setStats(null);
 			setLoading(`Loading ${entry.title}`);
 			setProgress(0);
@@ -91,26 +101,31 @@ function App() {
 				await fetchOk(`${modelDir}/${entry.meta}`)
 			).json();
 			const download = async (file: string) => {
+				const cached = downloads.get(file);
+				if (cached) return cached;
+
 				setLoading(`Downloading ${file}`);
 				setProgress(0);
-				return fetchBytes(`${modelDir}/${file}`, setProgress);
+				const bytes = await fetchBytes(`${modelDir}/${file}`, setProgress);
+				downloads.set(file, bytes);
+				return bytes;
 			};
-			const model = await download(meta.model);
+			// A new game starts on its default graph
+			let active = meta.models[0];
+			stepsRef.current = active.steps;
+			const model = await download(active.file);
 			const starts = await download(meta.starts.file);
 			if (cancelled) return;
 
-			setLoading("Compiling shaders");
-			let engine: Engine;
-			try {
-				engine = await Engine.create(model, meta.context);
-			} catch (createError) {
-				throw new Error(
-					`Creating the ONNX session failed: ${message(createError)}`,
-				);
-			}
+			const engine = new Engine(meta.context);
 			const input = listen(meta.keys, meta.input_mode);
 
 			try {
+				setLoading("Compiling shaders");
+				await engine.setModel(model);
+				if (cancelled) return;
+				setGraph(active);
+
 				const period = 1000 / meta.tick_hz;
 				let seed = 0;
 				let ticks = 0;
@@ -139,6 +154,23 @@ function App() {
 
 				restartRef.current = true;
 				while (!cancelled) {
+					if (stepsRef.current !== active.steps) {
+						active = meta.models.find(
+							candidate => candidate.steps === stepsRef.current,
+						)!;
+						const bytes = await download(active.file);
+						if (cancelled) break;
+						setLoading("Compiling shaders");
+						await engine.setModel(bytes);
+						if (cancelled) break;
+
+						// The stats restart with the new graph, and keys pressed during the switch are dropped
+						runMs.length = 0;
+						tickStarts.length = 0;
+						input.clear();
+						setGraph(active);
+						setLoading("");
+					}
 					if (restartRef.current) {
 						restartRef.current = false;
 						restart();
@@ -204,21 +236,43 @@ function App() {
 		};
 	}, []);
 
+	const restart = useCallback(() => {
+		restartRef.current = true;
+		pausedRef.current = false;
+		setPaused(false);
+	}, []);
+
+	const togglePause = useCallback(() => {
+		pausedRef.current = !pausedRef.current;
+		setPaused(pausedRef.current);
+	}, []);
+
+	useEffect(() => {
+		// Same as the buttons, which are disabled while loading
+		if (loading) return;
+
+		const onKeyDown = (event: KeyboardEvent) => {
+			// Leave browser shortcuts such as Cmd+R alone, and toggle once per press
+			if (
+				event.repeat ||
+				event.ctrlKey ||
+				event.metaKey ||
+				event.altKey ||
+				event.shiftKey
+			)
+				return;
+			if (event.code === "KeyP") togglePause();
+			if (event.code === "KeyR") restart();
+		};
+
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, [loading, restart, togglePause]);
+
 	const pick = (game: GameEntry) => {
 		pausedRef.current = false;
 		setPaused(false);
 		setEntry(game);
-	};
-
-	const restart = () => {
-		restartRef.current = true;
-		pausedRef.current = false;
-		setPaused(false);
-	};
-
-	const togglePause = () => {
-		pausedRef.current = !pausedRef.current;
-		setPaused(pausedRef.current);
 	};
 
 	const slow =
@@ -277,7 +331,7 @@ function App() {
 									type="button"
 									aria-pressed={game === entry}
 									onClick={() => pick(game)}
-									className={`${button} aria-pressed:border-blue-600 aria-pressed:bg-blue-600 aria-pressed:text-white dark:aria-pressed:border-blue-500 dark:aria-pressed:bg-blue-500 dark:aria-pressed:text-white`}>
+									className={`${button} ${toggle}`}>
 									{game.title}
 								</button>
 							))}
@@ -287,18 +341,40 @@ function App() {
 								type="button"
 								onClick={restart}
 								disabled={loading !== ""}
+								aria-keyshortcuts="R"
 								className={button}>
-								Restart
+								Restart (R)
 							</button>
 							<button
 								type="button"
 								onClick={togglePause}
 								disabled={loading !== ""}
+								aria-keyshortcuts="P"
 								className={button}>
-								{paused ? "Resume" : "Pause"}
+								{paused ? "Resume" : "Pause"} (P)
 							</button>
 						</div>
-						{meta && stats && (
+						{meta && graph && (
+							<div className="flex flex-wrap items-center gap-2">
+								<span className={`mr-2 text-sm ${label}`}>
+									Sampler steps
+								</span>
+								{meta.models.map(candidate => (
+									<button
+										key={candidate.steps}
+										type="button"
+										aria-pressed={candidate.steps === graph.steps}
+										onClick={() => {
+											stepsRef.current = candidate.steps;
+										}}
+										disabled={loading !== ""}
+										className={`${button} ${toggle}`}>
+										{candidate.steps}
+									</button>
+								))}
+							</div>
+						)}
+						{meta && graph && stats && (
 							<dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1.5 text-sm tabular-nums">
 								<dt className={label}>Inference ms</dt>
 								<dd>{stats.runMs ? stats.runMs.toFixed(1) : "-"}</dd>
@@ -311,7 +387,11 @@ function App() {
 									{meta.tick_hz} Hz
 								</dd>
 								<dt className={label}>Sampler steps</dt>
-								<dd>{meta.sampler.steps}</dd>
+								<dd>{graph.steps}</dd>
+								<dt className={label}>Model size</dt>
+								<dd>{(graph.bytes / bytesPerMb).toFixed(1)} MB</dd>
+								<dt className={label}>Backend</dt>
+								<dd>WebGPU</dd>
 								<dt className={label}>Seed</dt>
 								<dd>{stats.seed}</dd>
 								<dt className={label}>Ticks</dt>

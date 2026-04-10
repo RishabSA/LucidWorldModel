@@ -1,5 +1,5 @@
 import { fillNormal, mulberry32 } from "./noise.ts";
-import { ort } from "./runtime.ts";
+import { message, ort } from "./runtime.ts";
 
 export interface GameEntry {
 	game: string;
@@ -7,8 +7,17 @@ export interface GameEntry {
 	meta: string;
 }
 
+// One exported graph per sampler step count
+export interface Graph {
+	steps: number;
+	file: string;
+	bytes: number;
+}
+
 export interface Meta {
+	// The default graph, also models[0]
 	model: string;
+	models: Graph[];
 	tick_hz: number;
 	context: number;
 	input_mode: "queue" | "hold";
@@ -22,6 +31,16 @@ export const modelDir = "/models";
 export const frameSize = 64;
 export const pixels = frameSize * frameSize;
 const warmupRuns = 3;
+
+// onnxruntime-web's WebGPU build cannot overlap wasm calls, even across sessions; overlaps fail in BufferManager::Download or out of bounds
+let pending: Promise<unknown> = Promise.resolve();
+
+function exclusive<T>(task: () => Promise<T>): Promise<T> {
+	const result = pending.then(task);
+	// The chain only orders the calls; each caller still gets its own error
+	pending = result.catch(() => undefined);
+	return result;
+}
 
 // CHW floats in [-1, 1], already palette-snapped, to RGBA bytes
 export function toRgba(frame: Float32Array): Uint8ClampedArray<ArrayBuffer> {
@@ -47,14 +66,13 @@ export class Engine {
 	// shape: (3(N + 1), 64, 64)
 	readonly noise: Float32Array;
 	readonly n: number;
-	session: ort.InferenceSession;
+	session: ort.InferenceSession | null = null;
 	feeds: Record<string, ort.Tensor>;
 	random = mulberry32(0);
 	// Time of the last step's session.run, including the readback
 	runMs = 0;
 
-	constructor(session: ort.InferenceSession, n: number) {
-		this.session = session;
+	constructor(n: number) {
 		this.n = n;
 		this.context = new Float32Array(3 * n * pixels);
 		this.actions = new BigInt64Array(n);
@@ -77,16 +95,23 @@ export class Engine {
 		};
 	}
 
-	static async create(model: Uint8Array, n: number): Promise<Engine> {
-		const session = await ort.InferenceSession.create(model, {
-			executionProviders: ["webgpu"],
-		});
-		const engine = new Engine(session, n);
+	// Keeps the context, actions and noise generator, so a game in progress goes on with the new graph
+	async setModel(model: Uint8Array): Promise<void> {
+		await this.release();
 
-		// The first run compiles shaders and is slow
-		for (let i = 0; i < warmupRuns; i++) await engine.run();
-
-		return engine;
+		try {
+			this.session = await exclusive(() =>
+				ort.InferenceSession.create(model, {
+					executionProviders: ["webgpu"],
+				}),
+			);
+			// The first run compiles shaders and is slow
+			for (let i = 0; i < warmupRuns; i++) await this.run();
+		} catch (createError) {
+			throw new Error(
+				`Creating the ONNX session failed: ${message(createError)}`,
+			);
+		}
 	}
 
 	// The N - 1 start actions fill the end, so step() shifts the first slot out
@@ -127,9 +152,11 @@ export class Engine {
 		return this.context.subarray(3 * (this.n - 1) * pixels);
 	}
 
-	async run(): Promise<Float32Array> {
-		const { frame } = await this.session.run(this.feeds);
-		return (await frame.getData()) as Float32Array;
+	run(): Promise<Float32Array> {
+		return exclusive(async () => {
+			const { frame } = await this.session!.run(this.feeds);
+			return (await frame.getData()) as Float32Array;
+		});
 	}
 
 	async step(action: number): Promise<Float32Array> {
@@ -146,7 +173,9 @@ export class Engine {
 		return frame;
 	}
 
-	release(): Promise<void> {
-		return this.session.release();
+	async release(): Promise<void> {
+		const session = this.session;
+		this.session = null;
+		if (session) await exclusive(() => session.release());
 	}
 }
