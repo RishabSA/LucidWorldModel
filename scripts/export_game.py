@@ -50,8 +50,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--steps",
         type=int,
+        nargs="+",
         default=None,
-        help="Euler steps K; the run's sampler_steps when unset (default: None).",
+        help="Euler steps K, one graph each; the first is the default and gets the parity check (default: the run's sampler_steps).",
     )
     parser.add_argument(
         "--sigma-max",
@@ -106,19 +107,20 @@ if __name__ == "__main__":
     name = config["game"]
     game = importlib.import_module(f"scripts.games.{name}")
     n = config["context"]
-    steps = config["sampler_steps"] if args.steps is None else args.steps
+    steps = [config["sampler_steps"]] if args.steps is None else args.steps
     overrides = {
         key: vars(args)[key] for key in override_keys if vars(args)[key] is not None
     }
     sampler = {key: config[key] for key in sampler_keys} | overrides
 
-    model_path = args.out_dir / f"{name}.onnx"
+    model_paths = [args.out_dir / f"{name}_k{k}.onnx" for k in steps]
+    model_path = model_paths[0]
     meta_path = args.out_dir / f"{name}.json"
     starts_path = args.out_dir / f"{name}_starts.bin"
     parity_path = args.out_dir / f"{name}_parity.json"
     existing = [
         str(path)
-        for path in (model_path, meta_path, starts_path, parity_path)
+        for path in (*model_paths, meta_path, starts_path, parity_path)
         if path.exists()
     ]
     if existing and not args.force:
@@ -135,13 +137,17 @@ if __name__ == "__main__":
     palette = (
         torch.tensor(game.palette, dtype=torch.float32) / 127.5 - 1
     )  # shape: (colors, 3)
-    graph = FrameGraph(denoiser, steps, palette, **sampler).eval()
+    graphs = [FrameGraph(denoiser, k, palette, **sampler).eval() for k in steps]
+    inputs = random_inputs(n, torch.Generator().manual_seed(args.seed))
 
-    model = export(
-        graph, random_inputs(n, torch.Generator().manual_seed(args.seed)), model_path
-    )
-    ops = Counter(node.op_type for node in model.graph.node)
-    print(f"ops: {', '.join(f'{op} {count}' for op, count in ops.most_common())}")
+    for graph, path in zip(graphs, model_paths, strict=True):
+        model = export(graph, inputs, path)
+        ops = Counter(node.op_type for node in model.graph.node)
+        print(
+            f"{path.name} ops: {', '.join(f'{op} {count}' for op, count in ops.most_common())}"
+        )
+
+    graph = graphs[0]
 
     # A start is a fresh game: frame t + 1 after a restart at step t, and no event on the N - 1 steps inside the context
     split = json.loads((args.run / "split.json").read_text())
@@ -218,7 +224,11 @@ if __name__ == "__main__":
             code: action for code, action in key_codes.items() if action in game.actions
         },
         "palette": game.palette,
-        "sampler": {"steps": steps, **sampler},
+        "sampler": {"steps": steps[0], **sampler},
+        "models": [
+            {"steps": k, "file": path.name, "bytes": path.stat().st_size}
+            for k, path in zip(steps, model_paths, strict=True)
+        ],
         "starts": {"file": starts_path.name, "count": len(starts)},
         "parity": parity_path.name,
         "run": str(args.run),
@@ -240,5 +250,5 @@ if __name__ == "__main__":
     with open(manifest_path, "w") as file:
         json.dump(manifest, file, indent=2)
 
-    for path in (model_path, meta_path, starts_path, parity_path, manifest_path):
+    for path in (*model_paths, meta_path, starts_path, parity_path, manifest_path):
         print(f"{path}: {path.stat().st_size / 1e6:.3f} MB")

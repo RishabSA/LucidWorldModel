@@ -78,7 +78,17 @@ def make_run(tmp_path: Path) -> tuple[Path, set]:
 def run_export(run: Path, out: Path, starts: int) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "scripts.export_game", "--run", str(run)]
-        + ["--out-dir", str(out), "--steps", "2", "--sigma-min", "0.3", "--rho", "3"]
+        + [
+            "--out-dir",
+            str(out),
+            "--steps",
+            "2",
+            "1",
+            "--sigma-min",
+            "0.3",
+            "--rho",
+            "3",
+        ]
         + ["--starts", str(starts), "--parity-cases", str(parity_cases)],
         cwd=repo,
         check=False,
@@ -111,7 +121,7 @@ def test_export_writes_browser_files(tmp_path: Path) -> None:
     meta = json.loads((out / "snake.json").read_text())
     assert meta == {
         "game": "snake",
-        "model": "snake.onnx",
+        "model": "snake_k2.onnx",
         "tick_hz": snake.tick_hz,
         "context": n,
         "actions": snake.actions,
@@ -135,6 +145,14 @@ def test_export_writes_browser_files(tmp_path: Path) -> None:
             "sigma_min": 0.3,
             "rho": 3.0,
         },
+        "models": [
+            {
+                "steps": k,
+                "file": f"snake_k{k}.onnx",
+                "bytes": (out / f"snake_k{k}.onnx").stat().st_size,
+            }
+            for k in (2, 1)
+        ],
         "starts": {"file": "snake_starts.bin", "count": count},
         "parity": "snake_parity.json",
         "run": str(run),
@@ -163,7 +181,7 @@ def test_export_writes_browser_files(tmp_path: Path) -> None:
             torch.tensor([case["actions"]]),
             torch.from_numpy(noise.copy()),
         )
-        actual = to_frames(torch.from_numpy(run_onnx(out / "snake.onnx", inputs)))[0]
+        actual = to_frames(torch.from_numpy(run_onnx(out / "snake_k2.onnx", inputs)))[0]
         assert np.all(actual == expected, axis=-1).mean() >= min_parity
 
     result = run_export(run, out, len(windows))
