@@ -226,7 +226,9 @@ def sample(
 
     # First 3 noise channels seed the sampler, the rest augment the context (graph contract)
     batch = noise.shape[0]
-    x = sigma_max * noise[:, :3]  # shape: (batch, 3, 64, 64)
+
+    # Training saw y + sigma * noise; starting at zero instead of the last frame reads as a flash frame
+    x = context[:, -3:] + sigma_max * noise[:, :3]  # shape: (batch, 3, 64, 64)
     context = context + sigma_aug * noise[:, 3:]
     sigma_aug_batch = noise.new_full((batch,), sigma_aug)
 

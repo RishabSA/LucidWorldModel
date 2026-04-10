@@ -75,7 +75,7 @@ def test_one_step_is_one_denoiser_call() -> None:
     with torch.inference_mode():
         frame = sample(denoiser, frames, actions, noise, steps=1, sigma_max=sigma_max)
         denoised = denoiser(
-            sigma_max * noise[:, :3],
+            frames[:, -3:] + sigma_max * noise[:, :3],
             torch.full((batch,), sigma_max),
             frames,
             actions,
