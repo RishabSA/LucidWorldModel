@@ -22,6 +22,7 @@ export interface Meta {
 	context: number;
 	input_mode: "queue" | "hold";
 	keys: Record<string, number>;
+	palette: number[][];
 	sampler: { steps: number };
 	starts: { file: string; count: number };
 	parity: string;
@@ -149,7 +150,35 @@ export class Engine {
 			starts.subarray(actionsStart, actionsStart + this.n - 1),
 		);
 
+		return this.lastFrame();
+	}
+
+	// shape: (3, 64, 64)
+	lastFrame(): Float32Array {
 		return this.context.subarray(3 * (this.n - 1) * pixels);
+	}
+
+	// Paints into every context frame, so the model sees the paint as if it had always been there
+	paint(x: number, y: number, size: number, color: number[]): void {
+		const top = Math.max(0, y);
+		const bottom = Math.min(frameSize, y + size);
+		const left = Math.max(0, x);
+		const right = Math.min(frameSize, x + size);
+
+		for (let frame = 0; frame < this.n; frame++) {
+			for (let channel = 0; channel < 3; channel++) {
+				const value = color[channel] / 127.5 - 1;
+				const offset = (frame * 3 + channel) * pixels;
+
+				for (let row = top; row < bottom; row++) {
+					this.context.fill(
+						value,
+						offset + row * frameSize + left,
+						offset + row * frameSize + right,
+					);
+				}
+			}
+		}
 	}
 
 	run(): Promise<Float32Array> {

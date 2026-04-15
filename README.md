@@ -64,7 +64,7 @@ uv run python -m scripts.export_game --run runs/snake/base --steps 8 4 2 --sigma
 cd web && npm ci && npm run dev                               # http://localhost:5173
 ```
 
-In the app, arrows or WASD steer, Space hard-drops in Tetris, P pauses and R restarts. The sampler-steps buttons switch between the exported graphs mid-game. `/?parity` compares the browser's output with PyTorch, and `/?bench` times random-weight graphs.
+In the app, arrows or WASD steer, Space hard-drops in Tetris, P pauses and R restarts. The sampler-steps buttons switch between the exported graphs mid-game. While paused you can paint on the frame with the game's palette (paint food in front of the snake, erase a Tetris block); the paint goes into every context frame, and resuming shows what the model makes of it. `/?parity` compares the browser's output with PyTorch, and `/?bench` times random-weight graphs.
 
 ## Layout
 

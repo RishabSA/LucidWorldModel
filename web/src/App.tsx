@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useRef,
+	useState,
+	type PointerEvent,
+} from "react";
 
 import {
 	Engine,
@@ -18,6 +24,11 @@ import {
 	webGpuRequired,
 } from "./runtime.ts";
 
+interface Pixel {
+	x: number;
+	y: number;
+}
+
 interface Stats {
 	runMs: number;
 	tickRate: number;
@@ -31,6 +42,8 @@ const pausePollMs = 50;
 // Below this fraction of tick_hz, the tick rate shows as a warning
 const slowFraction = 0.95;
 const bytesPerMb = 1e6;
+// Brush widths in game pixels
+const brushSizes = [1, 2, 3, 4];
 const button =
 	"cursor-pointer rounded-md border border-neutral-300 px-4 py-1.5 text-sm transition-colors hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-neutral-700 dark:hover:bg-neutral-800";
 const toggle =
@@ -62,11 +75,23 @@ function App() {
 	const [progress, setProgress] = useState(0);
 	const [error, setError] = useState("");
 	const [paused, setPaused] = useState(false);
+	const [brushColor, setBrushColor] = useState(1);
+	const [brushSize, setBrushSize] = useState(1);
+	const [hover, setHover] = useState<Pixel | null>(null);
 	const canvasRef = useRef<HTMLCanvasElement>(null);
+	const engineRef = useRef<Engine | null>(null);
+	// The last painted pixel of the stroke in progress, null between strokes
+	const strokeRef = useRef<Pixel | null>(null);
 	// The tick loop reads these between ticks, so a click never interrupts a session.run
 	const pausedRef = useRef<boolean>(false);
 	const restartRef = useRef<boolean>(false);
 	const stepsRef = useRef<number>(0);
+
+	const drawFrame = (frame: Float32Array) => {
+		canvasRef.current
+			?.getContext("2d")
+			?.putImageData(new ImageData(toRgba(frame), frameSize, frameSize), 0, 0);
+	};
 
 	useEffect(() => {
 		let cancelled = false;
@@ -119,6 +144,7 @@ function App() {
 
 			const engine = new Engine(meta.context);
 			const input = listen(meta.keys, meta.input_mode);
+			engineRef.current = engine;
 
 			try {
 				setLoading("Compiling shaders");
@@ -131,22 +157,13 @@ function App() {
 				let ticks = 0;
 				const runMs: number[] = [];
 				const tickStarts: number[] = [];
-				const draw = (frame: Float32Array) => {
-					canvasRef.current
-						?.getContext("2d")
-						?.putImageData(
-							new ImageData(toRgba(frame), frameSize, frameSize),
-							0,
-							0,
-						);
-				};
 				const restart = () => {
 					seed = Math.floor(Math.random() * 2 ** 32);
 					ticks = 0;
 					runMs.length = 0;
 					tickStarts.length = 0;
 					input.clear();
-					draw(engine.restart(starts, meta.starts.count, seed));
+					drawFrame(engine.restart(starts, meta.starts.count, seed));
 					setStats({ runMs: 0, tickRate: 0, ticks, seed });
 					setMeta(meta);
 					setLoading("");
@@ -191,7 +208,7 @@ function App() {
 					if (runMs.length > statWindow) runMs.shift();
 					if (tickStarts.length > statWindow + 1) tickStarts.shift();
 					ticks++;
-					draw(frame);
+					drawFrame(frame);
 					setStats({
 						runMs: median(runMs),
 						tickRate:
@@ -206,6 +223,7 @@ function App() {
 					await sleep(Math.max(0, period - (performance.now() - start)));
 				}
 			} finally {
+				if (engineRef.current === engine) engineRef.current = null;
 				input.stop();
 				await engine.release();
 			}
@@ -275,6 +293,42 @@ function App() {
 		setEntry(game);
 	};
 
+	// The tick loop leaves the context alone while paused, so painting cannot race a run
+	const painting = paused && loading === "" && meta !== null;
+	const brushOffset = Math.floor(brushSize / 2);
+
+	const pixelAt = (event: PointerEvent<HTMLCanvasElement>): Pixel => {
+		const rect = event.currentTarget.getBoundingClientRect();
+		return {
+			x: Math.floor(((event.clientX - rect.left) / rect.width) * frameSize),
+			y: Math.floor(((event.clientY - rect.top) / rect.height) * frameSize),
+		};
+	};
+
+	// Fills the gap since the last pointer event, so fast strokes stay unbroken
+	const paintTo = (to: Pixel) => {
+		const engine = engineRef.current;
+		if (!engine || !meta) return;
+
+		const from = strokeRef.current ?? to;
+		const steps = Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y), 1);
+		for (let i = 0; i <= steps; i++) {
+			engine.paint(
+				Math.round(from.x + ((to.x - from.x) * i) / steps) - brushOffset,
+				Math.round(from.y + ((to.y - from.y) * i) / steps) - brushOffset,
+				brushSize,
+				meta.palette[brushColor],
+			);
+		}
+
+		strokeRef.current = to;
+		drawFrame(engine.lastFrame());
+	};
+
+	const endStroke = () => {
+		strokeRef.current = null;
+	};
+
 	const slow =
 		meta !== null &&
 		stats !== null &&
@@ -298,13 +352,39 @@ function App() {
 				</p>
 			) : (
 				<div className="flex flex-col gap-8 md:flex-row">
-					<div className="relative aspect-square w-full max-w-[512px] shrink-0 overflow-hidden rounded-md bg-neutral-900 dark:bg-neutral-800">
+					<div className="relative aspect-square w-full max-w-[512px] shrink-0 self-start overflow-hidden rounded-md bg-neutral-900 dark:bg-neutral-800">
 						<canvas
 							ref={canvasRef}
 							width={frameSize}
 							height={frameSize}
-							className={`size-full transition-opacity [image-rendering:pixelated] ${paused ? "opacity-40" : ""}`}
+							onPointerDown={event => {
+								if (!painting) return;
+								endStroke();
+								paintTo(pixelAt(event));
+							}}
+							onPointerMove={event => {
+								const pixel = pixelAt(event);
+								setHover(painting ? pixel : null);
+								if (painting && strokeRef.current) paintTo(pixel);
+							}}
+							onPointerUp={endStroke}
+							onPointerLeave={() => {
+								endStroke();
+								setHover(null);
+							}}
+							className={`size-full touch-none [image-rendering:pixelated] ${painting ? "cursor-crosshair" : ""}`}
 						/>
+						{painting && hover && (
+							<div
+								className="pointer-events-none absolute border border-white mix-blend-difference"
+								style={{
+									left: `${((hover.x - brushOffset) / frameSize) * 100}%`,
+									top: `${((hover.y - brushOffset) / frameSize) * 100}%`,
+									width: `${(brushSize / frameSize) * 100}%`,
+									height: `${(brushSize / frameSize) * 100}%`,
+								}}
+							/>
+						)}
 						{loading ? (
 							<div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-8 text-sm text-neutral-100 dark:text-neutral-200">
 								<p>{loading}</p>
@@ -317,7 +397,7 @@ function App() {
 							</div>
 						) : (
 							paused && (
-								<p className="absolute inset-0 flex items-center justify-center text-lg font-semibold text-neutral-100 dark:text-neutral-200">
+								<p className="pointer-events-none absolute right-3 bottom-3 rounded-md bg-neutral-900/80 px-2 py-1 text-xs font-semibold text-neutral-100 dark:bg-neutral-950/80 dark:text-neutral-200">
 									Paused
 								</p>
 							)
@@ -372,6 +452,40 @@ function App() {
 										{candidate.steps}
 									</button>
 								))}
+							</div>
+						)}
+						{painting && (
+							<div className="space-y-3">
+								<p className={`text-sm ${label}`}>
+									Paint on the frame while paused. The paint goes into every
+									context frame, so resuming shows what the model makes of it.
+								</p>
+								<div className="flex flex-wrap gap-1.5">
+									{meta.palette.map((color, index) => (
+										<button
+											key={color.join(",")}
+											type="button"
+											aria-label={`Paint color rgb(${color.join(", ")})`}
+											aria-pressed={index === brushColor}
+											onClick={() => setBrushColor(index)}
+											className="size-7 cursor-pointer rounded-md border border-neutral-300 transition-transform hover:scale-110 aria-pressed:ring-2 aria-pressed:ring-blue-600 aria-pressed:ring-offset-2 dark:border-neutral-700 dark:ring-offset-neutral-900 dark:aria-pressed:ring-blue-500"
+											style={{ backgroundColor: `rgb(${color.join(", ")})` }}
+										/>
+									))}
+								</div>
+								<div className="flex flex-wrap items-center gap-2">
+									<span className={`mr-2 text-sm ${label}`}>Brush</span>
+									{brushSizes.map(size => (
+										<button
+											key={size}
+											type="button"
+											aria-pressed={size === brushSize}
+											onClick={() => setBrushSize(size)}
+											className={`${button} ${toggle}`}>
+											{size} px
+										</button>
+									))}
+								</div>
 							</div>
 						)}
 						{meta && graph && stats && (
